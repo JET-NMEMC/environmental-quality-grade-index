@@ -1,0 +1,366 @@
+<!DOCTYPE html>
+<html lang="zh">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>海水水质类别评价系统</title>
+  <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
+  <script src="seawaterQualityStandards.js"></script>
+  <style>
+    body {
+      font-family: Arial, sans-serif;
+      margin: 20px;
+    }
+
+    table {
+      border-collapse: collapse;
+      margin-top: 15px;
+      width: 100%;
+    }
+
+    th,
+    td {
+      border: 1px solid #999;
+      padding: 6px;
+      text-align: center;
+      font-size: 14px;
+    }
+
+    th {
+      background-color: #f5f5f5;
+    }
+
+    .button {
+      margin: 10px 5px;
+      padding: 6px 12px;
+      background: #4CAF50;
+      color: white;
+      border: none;
+      cursor: pointer;
+      font-size: 14px;
+    }
+
+    .button:hover {
+      background: #45a049;
+    }
+
+    .invalid {
+      color: red;
+      font-weight: bold;
+    }
+
+    .no-standard {
+      color: orange;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <h2>海水水质评价系统</h2>
+  <input type="file" id="fileInput" accept=".xlsx, .xls, .csv" />
+  <div id="tableContainer"></div>
+  <button id="downloadBtn" class="button" style="display:none;">📥 下载评价结果</button>
+
+  <script>
+    // ========== 第一步：数据清洗 ==========
+    function parseValueWithLOD(str) {
+      if (str == null || str === '') return NaN;
+      let s = String(str).trim();
+      if (/^[+-]?\d*\.?\d+$/.test(s)) return parseFloat(s);
+      const match = s.match(/^([+-]?\d*\.?\d+)\s*[Ll]$/);
+      if (match && /^[+-]?\d*\.?\d+$/.test(match[1])) {
+        return parseFloat(match[1]);
+      }
+      return NaN;
+    }
+
+    // 构建名称映射
+    const nameToKeyMap = {};
+    for (const [key, config] of Object.entries(seawaterQualityStandards.items)) {
+      for (const name of config.names) {
+        nameToKeyMap[name.trim().toLowerCase()] = key;
+      }
+    }
+
+    /**
+     * 清洗原始数据
+     * @param {Array} jsonData - 原始表格（二维数组）
+     * @returns {Object} { cleanRecords, errors, displayHeaders }
+     */
+    function cleanData(jsonData) {
+      if (jsonData.length < 3) throw new Error('至少需要三行数据');
+
+      const rawHeaders = jsonData[0].slice(1); // 跳过“站位”列
+      const stationsData = jsonData.slice(2);
+
+      // 映射列头
+      const displayHeaders = [];
+      const headerKeyMap = {};
+
+      for (const raw of rawHeaders) {
+        const norm = String(raw).trim().toLowerCase();
+        const key = nameToKeyMap[norm];
+        if (key) {
+          displayHeaders.push(key);
+          headerKeyMap[raw] = key;
+        } else {
+          const unknown = `[未识别:${raw}]`;
+          displayHeaders.push(unknown);
+          headerKeyMap[raw] = null;
+        }
+      }
+
+      const cleanRecords = {}; // { 站位: { do: 8.2, cod: 0.5, ... } }
+      const errors = {};       // { 站位: { [header]: "错误信息" } }
+
+      stationsData.forEach(row => {
+        const station = row[0];
+        if (!station) return;
+
+        cleanRecords[station] = {};
+        errors[station] = {};
+
+        for (let i = 1; i < row.length; i++) {
+          const rawParam = jsonData[0][i];
+          const rawValue = row[i];
+          const standardKey = headerKeyMap[rawParam];
+          const displayKey = standardKey || `[未识别:${rawParam}]`;
+
+          // 空值
+          if (rawValue == null || rawValue === '') {
+            errors[station][displayKey] = '空值';
+            continue;
+          }
+
+          // 解析数值
+          const num = parseValueWithLOD(rawValue);
+          if (isNaN(num)) {
+            errors[station][displayKey] = `非数字:"${rawValue}"`;
+            continue;
+          }
+
+          // 无标准
+          if (!standardKey) {
+            errors[station][displayKey] = '无标准';
+            continue;
+          }
+
+          // 清洗成功
+          cleanRecords[station][standardKey] = num;
+        }
+      });
+
+      return { cleanRecords, errors, displayHeaders, headerKeyMap };
+    }
+
+    function evaluateValue(value, standard) {
+      const { type, values } = standard;
+      let categoryIndex = -1;
+
+      switch (type) {
+        case '≤':
+          for (let i = 0; i < values.length; i++) {
+            if (values[i] === null) {
+              continue;
+              // 菌群无4类标准，比较至null时，直接返回
+              // return '超3类';
+            }
+            if (value <= values[i]) {
+              categoryIndex = i;
+              break;
+            }
+          }
+          break;
+
+        case '>':
+          for (let i = 0; i < values.length; i++) {
+            if (value > values[i]) {
+              categoryIndex = i;
+              break;
+            }
+          }
+          break;
+
+        case '<>':
+          for (let i = 0; i < values.length; i++) {
+            const [min, max] = values[i];
+            if (value >= min && value <= max) {
+              categoryIndex = i;
+              break;
+            }
+          }
+          break;
+
+        default:
+          // 如果 type 不是预期的三种之一，可选择抛错或默认处理
+          console.warn(`未知的水质评价类型: ${type}`);
+          return '超4类';
+      }
+
+      return categoryIndex === -1 ? '超4类' : seawaterQualityStandards.categories[categoryIndex];
+    }
+    /**
+     * 对清洗后的数据进行评价
+     * @param {Object} cleanRecords - 清洗后的数据
+     * @param {Object} errors - 错误信息
+     * @param {Array} displayHeaders - 列头（含未识别项）
+     * @param {Object} headerKeyMap - 原始列 → 标准 key
+     * @returns {Object} 评价结果
+     */
+    function evaluateCleanData({ cleanRecords, errors, displayHeaders, headerKeyMap }) {
+      const results = {};
+
+      for (const [station, cleanRow] of Object.entries(cleanRecords)) {
+        const detail = {};
+        let worstIdx = -1;
+
+        // 先处理有标准的有效项
+        for (const [rawParam, key] of Object.entries(headerKeyMap)) {
+          const displayKey = key || `[未识别:${rawParam}]`;
+          if (key && cleanRow.hasOwnProperty(key)) {
+            const value = cleanRow[key];
+            const standard = seawaterQualityStandards.items[key];
+            const category = evaluateValue(value, standard);
+            detail[displayKey] = category;
+
+            if (category === '超4类') {
+              worstIdx = 4;
+            } else {
+              const idx = seawaterQualityStandards.categories.indexOf(category);
+              if (idx > worstIdx) worstIdx = idx;
+            }
+          }
+        }
+
+        // 再覆盖错误项（高亮显示）
+        if (errors[station]) {
+          for (const [displayKey, errorMsg] of Object.entries(errors[station])) {
+            if (errorMsg === '无标准') {
+              detail[displayKey] = { text: '无标准', type: 'no_standard' };
+            } else {
+              detail[displayKey] = { text: errorMsg, type: 'invalid_number' };
+            }
+          }
+        }
+
+        // 总体类别
+        const overall = worstIdx === 4 ? '超4类' :
+          worstIdx === -1 ? '无有效数据' :
+            seawaterQualityStandards.categories[worstIdx];
+
+        results[station] = { details: detail, overall };
+      }
+
+      return results;
+    }
+
+    // ========== 渲染与导出 ==========
+    function renderTable(results, displayHeaders) {
+      const container = document.getElementById('tableContainer');
+      container.innerHTML = '';
+
+      const table = document.createElement('table');
+      const thead = document.createElement('thead');
+      const headerRow = document.createElement('tr');
+      headerRow.innerHTML = '<th>站位</th>' +
+        displayHeaders.map(h => `<th>${h}</th>`).join('') +
+        '<th>总体类别</th>';
+      thead.appendChild(headerRow);
+      table.appendChild(thead);
+
+      const tbody = document.createElement('tbody');
+      for (const [station, data] of Object.entries(results)) {
+        const row = document.createElement('tr');
+        let cellsHTML = `<td>${station}</td>`;
+
+        for (const h of displayHeaders) {
+          const cellData = data.details[h];
+          let cellText = '—';
+          let className = '';
+
+          if (typeof cellData === 'object' && cellData !== null) {
+            cellText = cellData.text;
+            if (cellData.type === 'invalid_number' || cellData.type === 'empty') {
+              className = 'invalid';
+            } else if (cellData.type === 'no_standard') {
+              className = 'no-standard';
+            }
+          } else {
+            cellText = cellData;
+          }
+
+          cellsHTML += `<td class="${className}">${cellText}</td>`;
+        }
+
+        cellsHTML += `<td><strong>${data.overall}</strong></td>`;
+        row.innerHTML = cellsHTML;
+        tbody.appendChild(row);
+      }
+
+      table.appendChild(tbody);
+      container.appendChild(table);
+      document.getElementById('downloadBtn').style.display = 'inline-block';
+    }
+
+    function downloadExcel(results, displayHeaders) {
+      const wsData = [];
+      wsData.push(['站位', ...displayHeaders, '总体类别']);
+      for (const [station, data] of Object.entries(results)) {
+        const row = [station];
+        for (const h of displayHeaders) {
+          const cell = data.details[h];
+          if (typeof cell === 'object') {
+            row.push(cell.text);
+          } else {
+            row.push(cell || '—');
+          }
+        }
+        row.push(data.overall);
+        wsData.push(row);
+      }
+      const ws = XLSX.utils.aoa_to_sheet(wsData);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, "水质评价结果");
+      XLSX.writeFile(wb, "海水水质评价结果.xlsx");
+    }
+
+    // ========== 主流程 ==========
+    document.getElementById('fileInput').addEventListener('change', function (e) {
+      const file = e.target.files[0];
+      if (!file) return;
+
+      const reader = new FileReader();
+      reader.onload = function (e) {
+        try {
+          const data = new Uint8Array(e.target.result);
+          const workbook = XLSX.read(data, { type: 'array' });
+          const worksheet = workbook.Sheets[workbook.SheetNames[0]];
+          const jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+          // 第一步：清洗
+          const cleaned = cleanData(jsonData);
+
+          console.log("清洗后数据：")
+          console.log(cleaned)
+
+          // 第二步：评价
+          const results = evaluateCleanData(cleaned);
+
+          // 渲染
+          renderTable(results, cleaned.displayHeaders);
+          document.getElementById('downloadBtn').onclick = () =>
+            downloadExcel(results, cleaned.displayHeaders);
+
+        } catch (err) {
+          alert('处理失败：' + err.message);
+          console.error(err);
+        }
+      };
+      reader.readAsArrayBuffer(file);
+    });
+  </script>
+</body>
+
+</html>
