@@ -80,7 +80,7 @@
     const nameToKeyMap = {};
     for (const [key, config] of Object.entries(seawaterQualityStandards.items)) {
       for (const name of config.names) {
-        nameToKeyMap[name.trim().toLowerCase()] = key;
+        nameToKeyMap[String(name).trim().toLowerCase()] = key;
       }
     }
 
