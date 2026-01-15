@@ -58,7 +58,7 @@ const seawaterQualityStandards = {
       values: [0.02, 0.02, 0.02, 0.02]
     },
     '活性磷酸盐': {
-      names: ['活性磷酸盐', 'PO4', '磷酸盐', '正磷酸盐', 'Reactive Phosphate'],
+      names: ['活性磷酸盐', 'PO4', 'SPR', 'DIP', '磷酸盐', '正磷酸盐', 'Reactive Phosphate'],
       unit: 'mg/L',
       type: '≤',
       values: [0.015, 0.03, 0.03, 0.045]
