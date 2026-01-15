@@ -4,7 +4,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>环境质量等级指数</title>
+    <title>环境质量等级指数 (聚合增强版)</title>
     <script src="https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js"></script>
     <style>
         body {
@@ -39,12 +39,13 @@
 </head>
 
 <body>
-    <h1>环境质量等级指数：海水水质标准（GB 3097-1997）</h1>
+    <h1>环境质量等级指数 (聚合增强版)：海水水质标准（GB 3097-1997）</h1>
 
     <button onclick="downloadSample()">下载示例数据</button>
     <input type="file" id="fileInput" accept=".xlsx, .xls, .csv" onchange="processFile()" />
 
     <div id="resultContainer"></div>
+    <button id="export-excel" style="display: none;">下载评价结果 (Excel)</button>
     <!-- // 引入海水水质标准 -->
     <script src="seawaterQualityStandards.js"></script>
 
@@ -58,54 +59,16 @@
             document.body.removeChild(link);
         }
 
-        function isNumber(val) {
-            // var strVal = String(val).trim(); //移除空格（首尾）
-            var str = String(val).replace(/\s+/g, '');// 移除空格（包括中间、首尾）
-            if (str === '') return false; // 空字符串，直接返回
-            const reg = /^[-+]?\d*\.?\d+$/;
-            const illegalEdge = ['-', '+', '.', '-.', '+.']
-            return reg.test(str) && !illegalEdge.includes(str);
-        }
-
-        function smartToNonNegativeNumberOrOriginal(val, pollutantName, rowname) {
-
-            // 步骤1：统一预处理：转字符串 + 删除所有空格（首尾+中间）
-            const strVal = String(val).replace(/\s+/g, '');
-
-            // 删除空格后为空字符串或/→ 返回undefined
-            if (strVal === '' || strVal === '/') {
-                return undefined;
-            }
-
-            // 步骤2：定义「合法非负数字」的校验函数（移除正负号匹配，仅支持非负数）
-            const isLegalNonNegativeNumber = (str) => {
-                if (str === '') return false; // 空字符串提前排除（冗余但保留，防止逻辑变更）
-                const reg = /^\d*\.?\d*$/; // 仅支持 123、123.、.456、123.456 等非负格式
-                const illegalEdge = ['+', '.', '+.',];
-                return reg.test(str) && !illegalEdge.includes(str);
-            };
-
-            // 优先级1：业务特殊值（未检出）→ 返回0（最高优先级）
-            if (strVal === '未检出' || strVal === 'ND') {
-                return 0;
-            }
-
-            // 合并处理：先统一处理末尾L（有则删，无则保留），再校验数字
-            let processedStr = strVal;
-            const lastChar = strVal.slice(-1);
-            // 如果最后一个字符是L，删除L得到处理后的字符串
-            if (lastChar === 'L') {
-                processedStr = strVal.slice(0, -1);
-            }
-
-            // 统一校验：处理后的字符串是合法非负数字 → 转数字返回
-            if (isLegalNonNegativeNumber(processedStr)) {
-                return parseFloat(processedStr);
-            }
-
-            // 优先级4：其他情况 → 返回"非法字符"
-            console.log(`警告!!!发现未识别字符串或负数:项目[${pollutantName}]   行号[${rowname}]    值[${val}]`);
-            return '非法(' + val + ')';
+        // 数据清洗与转数字
+        function parseVal(val) {
+            if (val === undefined || val === null) return undefined;
+            const s = String(val).replace(/\s+/g, '').toUpperCase();
+            if (s === '' || s === '/') return undefined;
+            if (s === '未检出' || s === 'ND') return 0;
+            const numStr = s.endsWith('L') ? s.slice(0, -1) : s;
+            if (!/^\d*\.?\d+$/.test(numStr)) return `非法(${val})`;
+            const n = parseFloat(numStr);
+            return n >= 0 ? n : `非法(${val})`;
         }
 
 
@@ -217,17 +180,14 @@
                         for (let j = 1; j < row.length; j++) {
                             const pollutantName = pollutants[j - 1];
                             const csvUnit = csvUnits[j - 1] ? String(csvUnits[j - 1]).trim() : null;
-                            var processedValue = row[j];
-                            // 处理负值或无效值
-                            if (typeof processedValue === 'string' || processedValue < 0) {
-                                processedValue = smartToNonNegativeNumberOrOriginal(processedValue, pollutantName, row[0]);
-                            }
+                            var processedValue = parseVal(row[j]);
 
                             // 基于单位进行数字转换
                             if (typeof processedValue === 'number') {
-                                const standard = findStandard(pollutantName);
-                                if (standard && standard.unit && csvUnit) {
-                                    const standardUnit = standard.unit.trim();
+                                const standardResult = findStandard(pollutantName);
+                                if (standardResult && standardResult.item.unit && csvUnit) {
+                                    const standardItem = standardResult.item;
+                                    const standardUnit = standardItem.unit.trim();
                                     if (csvUnit !== standardUnit) {
                                         if (csvUnit === 'μg/L' && standardUnit === 'mg/L') {
                                             processedValue = processedValue / 1000;
@@ -303,28 +263,40 @@
                     results: {} // 统一存储结果，可以是数值（指数）或字符串（错误/状态）
                 };
 
+                // 预先查找温度值，以备DO计算使用
+                let temperatureValue = NaN;
+                for (const pName of pollutants) {
+                    const std = findStandard(pName);
+                    if (std && std.key === '温度') {
+                        temperatureValue = parseFloat(site.values[pName]);
+                        break;
+                    }
+                }
+
                 pollutants.forEach(pollutant => {
-                    if (pollutant.toLowerCase() === '温度') return;
-                    if (pollutant.toLowerCase() === '盐度') return;
+                    const standardResult = findStandard(pollutant);
+                    if (!standardResult) {
+                        result.results[pollutant] = '未找到标准';
+                        return;
+                    }
+
+                    const { item: standard, key } = standardResult;
+
+                    // 跳过不计算指数的项目（如温度、盐度）
+                    if (standard.type === 'none') return;
 
                     const value = site.values[pollutant];
-                    const standard = findStandard(pollutant);
 
-                    if (standard) {
-                        // 特殊处理DO：需要温度计算dof
-                        if (pollutant.toLowerCase() === '溶解氧') {
-                            const tempValue = parseFloat(site.values['温度']);
-                            if (isNaN(tempValue)) {
-                                result.results[pollutant] = '缺少温度';
-                            } else {
-                                const dof = 468 / (31.6 + tempValue);
-                                result.results[pollutant] = calculateIndex(value, standard, dof);
-                            }
+                    // 特殊处理溶解氧：需要温度计算dof
+                    if (key === '溶解氧') {
+                        if (isNaN(temperatureValue)) {
+                            result.results[pollutant] = '缺少温度';
                         } else {
-                            result.results[pollutant] = calculateIndex(value, standard);
+                            const dof = 468 / (31.6 + temperatureValue);
+                            result.results[pollutant] = calculateIndex(value, standard, dof);
                         }
                     } else {
-                        result.results[pollutant] = '项目错误';
+                        result.results[pollutant] = calculateIndex(value, standard);
                     }
                 });
 
@@ -351,8 +323,12 @@
             siteHeader.textContent = '站点';
             headerRow.appendChild(siteHeader);
 
-            // 过滤掉温度项（不在表头显示）
-            const displayPollutants = pollutants.filter(p => p.toLowerCase() !== '温度' && p.toLowerCase() !== '盐度');
+            // 过滤掉不显示指数的项目（如温度、盐度）
+            const displayPollutants = pollutants.filter(p => {
+                const std = findStandard(p);
+                if (!std) return true; // 未找到标准的项目也显示
+                return std.item.type !== 'none';
+            });
 
             displayPollutants.forEach(pollutant => {
                 const th = document.createElement('th');
@@ -388,7 +364,7 @@
                         td.textContent = val.toFixed(3);
                     } else {
                         td.textContent = val || '';
-                        const errorStrings = ['非法', '项目错误', '缺少温度', '未知类型'];
+                        const errorStrings = ['非法', '未找到标准', '缺少温度', '未知类型'];
 
                         const isError = val != null && errorStrings.some(keyword =>
                             String(val).includes(keyword)
@@ -426,7 +402,7 @@
             }
         }
 
-        // 根据污染物名称查找标准
+        // 根据污染物名称查找标准，返回 { item, key }
         function findStandard(pollutantName) {
             // 遍历所有标准项
             for (const key in seawaterQualityStandards.items) {
@@ -434,33 +410,21 @@
 
                 // 检查标准项的名称或别名是否匹配
                 if (item.names.some(name =>
-                    name.toLowerCase() === pollutantName.toLowerCase())) {
-                    return item;
+                    name.toLowerCase() === pollutantName.trim().toLowerCase())) {
+                    return { item, key };
                 }
             }
 
             return null;
         }
 
+        document.getElementById('export-excel').onclick = () => {
+            const wb = XLSX.utils.book_new(), ws = XLSX.utils.table_to_sheet(document.querySelector('table'));
+            XLSX.utils.book_append_sheet(wb, ws, "评价结果");
+            XLSX.writeFile(wb, "海水水质评价结果.xlsx");
+        };
+
     </script>
 </body>
 
 </html>
-
-<button id="export-excel" style="display: none;">下载评价结果 (Excel)</button>
-<script>
-    document.getElementById('export-excel').addEventListener('click', function () {
-        // 获取评价结果表格
-        const table = document.querySelector('table'); // 请替换为实际表格选择器
-
-        // 创建工作簿和工作表
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.table_to_sheet(table);
-
-        // 添加工作表到工作簿
-        XLSX.utils.book_append_sheet(wb, ws, "评价结果");
-
-        // 生成Excel文件并下载
-        XLSX.writeFile(wb, "海水水质评价结果.xlsx");
-    });
-</script>
